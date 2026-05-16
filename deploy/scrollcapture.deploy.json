@@ -1,0 +1,39 @@
+{
+  "_comment": "Copy to your app repo (e.g. deploy/myapp.deploy.json). Paths are relative to this JSON file unless absolute.",
+  "display_name": "ScrollCapture",
+  "project_root": "..",
+  "application_id": "com.scrollcapture",
+  "main_activity": ".MainActivity",
+  "logcat_default_package_filter": "com.scrollcapture",
+  "artifacts": {
+    "debug_apk": "app/build/outputs/apk/debug/app-debug.apk",
+    "release_aab": "app/build/outputs/bundle/release/app-release.aab"
+  },
+  "gradle": {
+    "wrapper_windows": "gradlew.bat",
+    "wrapper_unix": "./gradlew",
+    "task_assemble_debug": "assembleDebug",
+    "task_bundle_release": "bundleRelease"
+  },
+  "java_home_candidates": [
+    "env:JAVA_HOME",
+    "C:\\Program Files\\Android\\Android Studio\\jbr",
+    "C:\\Program Files\\Android\\Android Studio\\jre",
+    "C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.13.11-hotspot"
+  ],
+  "extra_android_sdk_search_roots": [],
+  "network": {
+    "apk_server_host": "0.0.0.0",
+    "apk_server_port": 8086,
+    "logcat_bind_host": "127.0.0.1",
+    "logcat_port": 8767,
+    "staging_dir": "deploy_staging",
+    "download_apk_filename": "app-debug.apk",
+    "download_page_title": "Download build",
+    "include_aab_in_staging": false,
+    "download_aab_filename": "app-release.aab"
+  },
+  "wireless": {
+    "state_file": "deploy/deploy_wireless.json"
+  }
+}

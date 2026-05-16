@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ScrollCapture</string>
+    <string name="accessibility_service_description">ScrollCapture uses this service to automatically scroll content on your screen during a capture session. This allows hands-free capture of long documents, chat conversations, and articles.</string>
+
+    <!-- Notification channels -->
+    <string name="capture_channel_name">Screen Capture</string>
+    <string name="capture_channel_description">Shows when screen capture is active</string>
+    <string name="overlay_channel_name">Overlay Controls</string>
+    <string name="overlay_channel_description">Shows when the floating overlay is active</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_title_1">Screen Recording</string>
+    <string name="onboarding_desc_1">ScrollCapture needs to record your screen to capture text from any app. Your screen content is processed entirely on-device and never leaves your phone.</string>
+    <string name="onboarding_title_2">Auto-Scroll</string>
+    <string name="onboarding_desc_2">Enable the accessibility service to let ScrollCapture automatically scroll through content for hands-free capture. This is optional — you can always scroll manually.</string>
+    <string name="onboarding_title_3">Display Over Apps</string>
+    <string name="onboarding_desc_3">ScrollCapture needs to show a floating bubble over other apps so you can control capture sessions while using any app.</string>
+
+    <!-- Prompts -->
+    <string name="prompt_quick_summary">Summarize the following text in 2–3 concise sentences:\n\n---\n\n</string>
+    <string name="prompt_eli5">Explain the following text like I\'m 5 years old, using simple words and short sentences:\n\n---\n\n</string>
+    <string name="prompt_detailed_summary">Give a detailed summary (approximately 100 lines) of the following text, organized with key points and section headers:\n\n---\n\n</string>
+    <string name="prompt_conversation_recap">This is a chat conversation. Summarize who said what, the key decisions made, any action items or follow-ups, and the overall tone:\n\n---\n\n</string>
+    <string name="prompt_key_takeaways">List the top 10 most important points and takeaways from the following text:\n\n---\n\n</string>
+</resources>
