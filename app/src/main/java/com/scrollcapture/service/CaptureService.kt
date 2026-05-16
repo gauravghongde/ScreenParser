@@ -15,6 +15,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.IBinder
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.scrollcapture.MainActivity
@@ -68,12 +69,8 @@ class CaptureService : Service() {
                 }
                 if (resultCode != -1 && resultData != null) startCapture(resultCode, resultData)
             }
-            ACTION_PAUSE -> {
-                ScrollCaptureApp.instance.container.captureSessionManager.pauseSession()
-            }
-            ACTION_RESUME -> {
-                ScrollCaptureApp.instance.container.captureSessionManager.resumeSession()
-            }
+            ACTION_PAUSE -> ScrollCaptureApp.instance.container.captureSessionManager.pauseSession()
+            ACTION_RESUME -> ScrollCaptureApp.instance.container.captureSessionManager.resumeSession()
             ACTION_STOP -> {
                 scope.launch {
                     ScrollCaptureApp.instance.container.captureSessionManager.stopSession()
@@ -90,39 +87,54 @@ class CaptureService : Service() {
         mediaProjection = pm.getMediaProjection(resultCode, resultData)
         mediaProjection?.registerCallback(projectionCallback, null)
 
-        // Bug 5 fix: increase buffer from 2 → 3 to reduce dropped frames between polls
+        // 3 slots so frames are not dropped between 400ms polls
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScrollCapture", screenWidth, screenHeight, screenDensity,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null
         )
         ScrollCaptureApp.instance.container.captureSessionManager.startSession()
+        startCaptureLoop()
+    }
 
-        // Bug 5 fix: poll at ~2.5 fps instead of 1 fps so fast scrolling isn't missed
+    /**
+     * Frame-polling loop wrapped in try-catch so a single bad frame never kills the job.
+     *
+     * Previously any uncaught exception inside `while (isActive)` terminated captureJob
+     * permanently, making Resume a no-op because the polling loop was already dead.
+     */
+    private fun startCaptureLoop() {
+        captureJob?.cancel()
         captureJob = scope.launch {
-            while (isActive) { delay(400L); captureFrame() }
+            while (isActive) {
+                delay(400L)
+                try {
+                    captureFrame()
+                } catch (e: CancellationException) {
+                    throw e   // always let cancellation propagate
+                } catch (e: Exception) {
+                    Log.e(TAG, "captureFrame error — skipping frame, loop continues", e)
+                }
+            }
         }
     }
 
     private fun captureFrame() {
         val image: Image = imageReader?.acquireLatestImage() ?: return
         try {
-            val bitmap = imageToBitmap(image)
-            if (bitmap != null) {
-                ScrollCaptureApp.instance.container.captureSessionManager.processFrame(bitmap)
-            }
-        } finally { image.close() }
+            val bitmap = imageToBitmap(image) ?: return
+            ScrollCaptureApp.instance.container.captureSessionManager.processFrame(bitmap)
+        } finally {
+            image.close()
+        }
     }
 
     /**
-     * Bug 2 fix: correctly handle ImageReader row-stride padding.
+     * Converts an ImageReader plane to a Bitmap, correctly handling row-stride padding.
      *
-     * Android image planes use rowStride which is often wider than width × pixelStride.
-     * Copying the raw buffer directly into a width-sized bitmap silently corrupts the image
-     * because the padding bytes shift every row. Instead we:
-     *   1. Create the bitmap at the padded width (rowStride / pixelStride).
-     *   2. Copy the buffer directly — no manual ByteArray needed.
-     *   3. Crop to the real screen width to strip the right-side padding.
+     * Android image planes use rowStride which is often wider than width x pixelStride.
+     * Creating the bitmap at paddedWidth = rowStride/pixelStride ensures the buffer
+     * layout matches the bitmap layout exactly. We then crop to the real screen width.
      */
     private fun imageToBitmap(image: Image): Bitmap? {
         val plane = image.planes.firstOrNull() ?: return null
@@ -130,16 +142,15 @@ class CaptureService : Service() {
         val pixelStride = plane.pixelStride
         val rowStride = plane.rowStride
 
-        // Padded width that aligns with the buffer layout
+        if (pixelStride <= 0 || rowStride <= 0 || image.width <= 0 || image.height <= 0) {
+            return null
+        }
+
         val paddedWidth = rowStride / pixelStride
-
-        if (paddedWidth <= 0 || image.height <= 0) return null
-
         val bitmap = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
         buffer.rewind()
         bitmap.copyPixelsFromBuffer(buffer)
 
-        // Crop to actual screen width if padding was added
         return if (paddedWidth != image.width) {
             val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
             bitmap.recycle()
@@ -150,28 +161,41 @@ class CaptureService : Service() {
     }
 
     private fun stopCapture() {
-        captureJob?.cancel(); captureJob = null
-        virtualDisplay?.release(); virtualDisplay = null
-        imageReader?.close(); imageReader = null
+        captureJob?.cancel()
+        captureJob = null
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
         mediaProjection?.unregisterCallback(projectionCallback)
-        mediaProjection?.stop(); mediaProjection = null
+        mediaProjection?.stop()
+        mediaProjection = null
         isRunning = false
     }
 
     private fun createNotification(): Notification {
-        val pi = PendingIntent.getActivity(this, 0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val pi = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, ScrollCaptureApp.CAPTURE_CHANNEL_ID)
             .setContentTitle("ScrollCapture")
             .setContentText("Capturing screen…")
             .setSmallIcon(R.drawable.ic_capture)
-            .setContentIntent(pi).setOngoing(true).setSilent(true).build()
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
     }
 
-    override fun onDestroy() { stopCapture(); scope.cancel(); super.onDestroy() }
+    override fun onDestroy() {
+        stopCapture()
+        scope.cancel()
+        super.onDestroy()
+    }
 
     companion object {
+        private const val TAG = "CaptureService"
         const val ACTION_START = "com.scrollcapture.ACTION_START_CAPTURE"
         const val ACTION_PAUSE = "com.scrollcapture.ACTION_PAUSE_CAPTURE"
         const val ACTION_RESUME = "com.scrollcapture.ACTION_RESUME_CAPTURE"
@@ -191,7 +215,9 @@ class CaptureService : Service() {
         }
 
         fun sendAction(context: Context, action: String) {
-            context.startService(Intent(context, CaptureService::class.java).apply { this.action = action })
+            context.startService(
+                Intent(context, CaptureService::class.java).apply { this.action = action }
+            )
         }
     }
 }

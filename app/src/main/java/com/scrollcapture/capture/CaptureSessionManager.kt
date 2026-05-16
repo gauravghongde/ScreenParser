@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class CaptureState(
     val isCapturing: Boolean = false,
@@ -27,12 +29,18 @@ class CaptureSessionManager(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val dedup = DeduplicationEngine()
 
+    /**
+     * Serialises all DeduplicationEngine access.
+     *
+     * processFrame launches one coroutine per frame on Dispatchers.Default (a thread pool).
+     * Without this mutex multiple OCR results arrive concurrently and simultaneously mutate
+     * assembledLines / previousFrameLines, corrupting the assembled text.
+     */
+    private val dedupMutex = Mutex()
+
     private val _state = MutableStateFlow(CaptureState())
     val state: StateFlow<CaptureState> = _state.asStateFlow()
 
-    /**
-     * Start a new capture session.
-     */
     fun startSession() {
         dedup.reset()
         _state.value = CaptureState(
@@ -42,22 +50,20 @@ class CaptureSessionManager(
         )
     }
 
-    /**
-     * Pause the current session (stops processing frames but keeps state).
-     */
     fun pauseSession() {
         _state.value = _state.value.copy(isPaused = true)
     }
 
-    /**
-     * Resume a paused session.
-     */
     fun resumeSession() {
         _state.value = _state.value.copy(isPaused = false)
     }
 
     /**
-     * Process a captured screen bitmap. Runs OCR and feeds into dedup engine.
+     * Process a captured screen bitmap. Runs OCR then feeds into the dedup engine.
+     *
+     * OCR runs concurrently across frames (intentional — keeps throughput high), but
+     * DeduplicationEngine writes are serialised through dedupMutex so order-sensitive
+     * state (assembledLines, previousFrameLines) is never touched by two coroutines at once.
      */
     fun processFrame(bitmap: Bitmap) {
         val currentState = _state.value
@@ -70,14 +76,15 @@ class CaptureSessionManager(
             try {
                 val lines = ocrEngine.recognize(bitmap)
                 if (lines.isNotEmpty()) {
-                    dedup.processFrame(lines)
-                    _state.value = _state.value.copy(
-                        frameCount = dedup.getFrameCount(),
-                        charCount = dedup.getCharCount()
-                    )
+                    dedupMutex.withLock {
+                        dedup.processFrame(lines)
+                        _state.value = _state.value.copy(
+                            frameCount = dedup.getFrameCount(),
+                            charCount = dedup.getCharCount()
+                        )
+                    }
                 }
             } catch (e: Exception) {
-                // Log but don't crash — OCR failures on individual frames are recoverable
                 e.printStackTrace()
             } finally {
                 bitmap.recycle()
@@ -85,15 +92,13 @@ class CaptureSessionManager(
         }
     }
 
-    /**
-     * Stop the current session, save to database, and return the session ID.
-     */
     suspend fun stopSession(): Long {
         val currentState = _state.value
-        val assembledText = dedup.getAssembledText()
+
+        // Acquire mutex before reading so any in-flight OCR results are flushed first
+        val assembledText = dedupMutex.withLock { dedup.getAssembledText() }
         val duration = System.currentTimeMillis() - currentState.startTime
 
-        // Generate title from first meaningful line
         val title = assembledText.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.length > 5 }
@@ -112,13 +117,10 @@ class CaptureSessionManager(
         val id = repository.insertSession(session)
 
         _state.value = CaptureState(currentSessionId = id)
-        dedup.reset()
+        dedupMutex.withLock { dedup.reset() }
 
         return id
     }
 
-    /**
-     * Get the current assembled text without stopping.
-     */
     fun getCurrentText(): String = dedup.getAssembledText()
 }

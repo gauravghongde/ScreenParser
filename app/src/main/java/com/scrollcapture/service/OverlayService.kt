@@ -37,6 +37,15 @@ class OverlayService : Service() {
     private var initialTouchY = 0f
     private var isDragging = false
 
+    // Tag constants for views that need runtime updates
+    private companion object {
+        const val TAG_FRAMES = "tv_frames"
+        const val TAG_CHARS = "tv_chars"
+        const val TAG_PAUSE_RESUME = "btn_pause_resume"
+        const val TAG_AUTOSCROLL = "tv_autoscroll"
+        const val NOTIFICATION_ID = 1002
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -45,8 +54,8 @@ class OverlayService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
-                NOTIFICATION_ID, 
-                createNotification(), 
+                NOTIFICATION_ID,
+                createNotification(),
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             )
         } else {
@@ -92,11 +101,7 @@ class OverlayService : Service() {
     }
 
     private fun toggleExpanded() {
-        if (isExpanded) {
-            collapseOverlay()
-        } else {
-            expandOverlay()
-        }
+        if (isExpanded) collapseOverlay() else expandOverlay()
     }
 
     private fun expandOverlay() {
@@ -106,7 +111,7 @@ class OverlayService : Service() {
 
         val dp = resources.displayMetrics.density
         val w = (220 * dp).toInt()
-        val h = (280 * dp).toInt()
+        val h = (300 * dp).toInt()
 
         val panel = createExpandedPanel()
 
@@ -135,7 +140,6 @@ class OverlayService : Service() {
             val pad = (16 * dp).toInt()
             setPadding(pad, pad, pad, pad)
 
-            // Title
             addView(TextView(ctx).apply {
                 text = "ScrollCapture"
                 setTextColor(0xFFE8E6F0.toInt())
@@ -143,34 +147,32 @@ class OverlayService : Service() {
                 setPadding(0, 0, 0, (8 * dp).toInt())
             })
 
-            // Frame count
             addView(TextView(ctx).apply {
-                tag = "tv_frames"
+                tag = TAG_FRAMES
                 text = "Frames: 0"
                 setTextColor(0xFF9A97A8.toInt())
                 textSize = 13f
             })
 
-            // Char count
             addView(TextView(ctx).apply {
-                tag = "tv_chars"
+                tag = TAG_CHARS
                 text = "Characters: 0"
                 setTextColor(0xFF9A97A8.toInt())
                 textSize = 13f
                 setPadding(0, 0, 0, (12 * dp).toInt())
             })
 
-            // Start/Resume button
-            addView(createButton(ctx, "▶  Resume", 0xFF7C3AED.toInt()) {
-                ScrollCaptureApp.instance.container.captureSessionManager.resumeSession()
-            })
-
-            // Pause button
+            // Combined Pause / Resume toggle button
+            // Label and action update in observeState() based on live CaptureState
             addView(createButton(ctx, "⏸  Pause", 0xFF14B8A6.toInt()) {
-                ScrollCaptureApp.instance.container.captureSessionManager.pauseSession()
-            })
+                val state = ScrollCaptureApp.instance.container.captureSessionManager.state.value
+                if (state.isPaused) {
+                    CaptureService.sendAction(ctx, CaptureService.ACTION_RESUME)
+                } else {
+                    CaptureService.sendAction(ctx, CaptureService.ACTION_PAUSE)
+                }
+            }.also { it.tag = TAG_PAUSE_RESUME })
 
-            // Stop button
             addView(createButton(ctx, "⏹  Stop", 0xFFEF4444.toInt()) {
                 scope.launch {
                     ScrollCaptureApp.instance.container.captureSessionManager.stopSession()
@@ -180,20 +182,16 @@ class OverlayService : Service() {
                 }
             })
 
-            // Auto-scroll toggle
             addView(TextView(ctx).apply {
-                tag = "tv_autoscroll"
+                tag = TAG_AUTOSCROLL
                 text = "⚡ Auto-scroll: OFF"
                 setTextColor(0xFFA78BFA.toInt())
                 textSize = 13f
                 val topPad = (12 * dp).toInt()
                 setPadding(0, topPad, 0, 0)
-                setOnClickListener {
-                    toggleAutoScroll(this)
-                }
+                setOnClickListener { toggleAutoScroll(this) }
             })
 
-            // Collapse button
             addView(TextView(ctx).apply {
                 text = "━  Minimize"
                 setTextColor(0xFF9A97A8.toInt())
@@ -217,9 +215,7 @@ class OverlayService : Service() {
             )
         } else {
             tv.text = "⚡ Auto-scroll: OFF"
-            ScrollAccessibilityService.sendCommand(
-                this, ScrollAccessibilityService.ACTION_STOP_SCROLL
-            )
+            ScrollAccessibilityService.sendCommand(this, ScrollAccessibilityService.ACTION_STOP_SCROLL)
         }
     }
 
@@ -233,12 +229,10 @@ class OverlayService : Service() {
             val hPad = (12 * dp).toInt()
             val vPad = (8 * dp).toInt()
             setPadding(hPad, vPad, hPad, vPad)
-            val lp = LinearLayout.LayoutParams(
+            layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            lp.topMargin = (4 * dp).toInt()
-            layoutParams = lp
+            ).also { it.topMargin = (4 * dp).toInt() }
             setOnClickListener { onClick() }
         }
     }
@@ -250,12 +244,24 @@ class OverlayService : Service() {
         bubbleView?.visibility = View.VISIBLE
     }
 
+    /**
+     * Observes CaptureState and updates:
+     *  - frame / char counters
+     *  - Pause/Resume button label — this is what makes the Resume button work correctly.
+     *    Previously the button was always labelled "Resume" regardless of pause state, and
+     *    it called resumeSession() directly on the manager instead of going through
+     *    CaptureService, so the service's own state was bypassed.
+     */
     private fun observeState() {
         scope.launch {
             ScrollCaptureApp.instance.container.captureSessionManager.state.collectLatest { state ->
                 expandedView?.let { panel ->
-                    panel.findViewWithTag<TextView>("tv_frames")?.text = "Frames: ${state.frameCount}"
-                    panel.findViewWithTag<TextView>("tv_chars")?.text = "Characters: ${state.charCount}"
+                    panel.findViewWithTag<TextView>(TAG_FRAMES)?.text =
+                        "Frames: ${state.frameCount}"
+                    panel.findViewWithTag<TextView>(TAG_CHARS)?.text =
+                        "Characters: ${state.charCount}"
+                    panel.findViewWithTag<TextView>(TAG_PAUSE_RESUME)?.text =
+                        if (state.isPaused) "▶  Resume" else "⏸  Pause"
                 }
             }
         }
@@ -286,11 +292,8 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!isDragging) onClick()
-                    // Check trash zone (bottom of screen)
                     val screenH = resources.displayMetrics.heightPixels
-                    if (params.y > screenH - 200) {
-                        stopSelf()
-                    }
+                    if (params.y > screenH - 200) stopSelf()
                     true
                 }
                 else -> false
@@ -303,10 +306,15 @@ class OverlayService : Service() {
             .setContentTitle("ScrollCapture Overlay")
             .setContentText("Tap bubble to control capture")
             .setSmallIcon(R.drawable.ic_capture)
-            .setContentIntent(PendingIntent.getActivity(this, 0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .setOngoing(true).setSilent(true).build()
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this, 0, Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
 
     override fun onDestroy() {
         bubbleView?.let { windowManager?.removeView(it) }
@@ -317,7 +325,6 @@ class OverlayService : Service() {
     }
 
     companion object {
-        const val NOTIFICATION_ID = 1002
         var isRunning = false; private set
     }
 }
