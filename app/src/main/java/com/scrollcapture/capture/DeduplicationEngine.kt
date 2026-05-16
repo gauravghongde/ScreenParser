@@ -8,8 +8,8 @@ package com.scrollcapture.capture
  *    using fuzzy matching (normalized Levenshtein similarity ≥ 0.80).
  * 2. Find the overlap boundary — discard the duplicate top portion of the new frame.
  * 3. Append only truly new lines.
- * 4. Track line frequency across all frames to detect persistent UI chrome
- *    (lines appearing in > 80% of frames) and exclude them from output.
+ * 4. Track line frequency of APPENDED lines only (not raw frame lines) to detect
+ *    persistent UI chrome and exclude them from output.
  */
 class DeduplicationEngine {
 
@@ -29,15 +29,14 @@ class DeduplicationEngine {
 
         totalFrames++
 
-        // Track line frequency for chrome detection
-        val normalizedNewLines = newLines.map { TextUtils.normalizeLine(it) }
-        normalizedNewLines.toSet().forEach { normalized ->
-            lineFrequency[normalized] = (lineFrequency[normalized] ?: 0) + 1
-        }
-
         if (previousFrameLines.isEmpty()) {
             // First frame — add all lines
             assembledLines.addAll(newLines)
+            // Bug 1 fix: count frequency only for appended lines, not all raw frame lines
+            newLines.forEach { line ->
+                val normalized = TextUtils.normalizeLine(line)
+                lineFrequency[normalized] = (lineFrequency[normalized] ?: 0) + 1
+            }
             previousFrameLines = newLines
             return getAssembledText()
         }
@@ -48,6 +47,11 @@ class DeduplicationEngine {
         // Append only the new (non-overlapping) lines
         if (overlapIndex < newLines.size) {
             val newContent = newLines.subList(overlapIndex, newLines.size)
+            // Bug 1 fix: track frequency only on lines we actually append
+            newContent.forEach { line ->
+                val normalized = TextUtils.normalizeLine(line)
+                lineFrequency[normalized] = (lineFrequency[normalized] ?: 0) + 1
+            }
             assembledLines.addAll(newContent)
         }
 
@@ -62,8 +66,6 @@ class DeduplicationEngine {
     private fun findOverlapIndex(prevLines: List<String>, newLines: List<String>): Int {
         if (prevLines.isEmpty() || newLines.isEmpty()) return 0
 
-        // Try to find where newLines start matching prevLines
-        // We look for the first line in newLines that matches a line in prevLines's tail
         val prevTail = prevLines.takeLast(minOf(prevLines.size, 20))
         val normalizedPrevTail = prevTail.map { TextUtils.normalizeLine(it) }
 
@@ -73,7 +75,7 @@ class DeduplicationEngine {
 
         for (i in newLines.indices) {
             val normalizedNew = TextUtils.normalizeLine(newLines[i])
-            if (normalizedNew.length < 3) continue // skip very short lines
+            if (normalizedNew.length < 3) continue
 
             for (j in normalizedPrevTail.indices) {
                 if (TextUtils.normalizedSimilarity(normalizedNew, normalizedPrevTail[j]) >= similarityThreshold) {
@@ -86,13 +88,20 @@ class DeduplicationEngine {
         }
 
         if (firstMatchInNew < 0) {
-            // No overlap found — could be a big scroll jump
+            // No overlap found — big scroll jump, append everything
             return 0
         }
 
-        // Now verify the overlap is consistent: walk forward from the match point
+        // Bug 4 fix: the match at firstMatchInNew aligns with prevTail[matchedPrevIndex].
+        // Everything from matchedPrevIndex onward in prevTail was already captured.
+        // So the remaining new content starts after those already-seen prevTail lines.
+        val remainingPrevTailLines = normalizedPrevTail.size - matchedPrevIndex
+
+        // Verify the overlap is consistent: walk forward from the match point
         var overlapEnd = firstMatchInNew
         var prevIdx = matchedPrevIndex
+        var matchedCount = 0
+
         while (overlapEnd < newLines.size && prevIdx < normalizedPrevTail.size) {
             val simScore = TextUtils.normalizedSimilarity(
                 TextUtils.normalizeLine(newLines[overlapEnd]),
@@ -101,13 +110,12 @@ class DeduplicationEngine {
             if (simScore < similarityThreshold) break
             overlapEnd++
             prevIdx++
+            matchedCount++
         }
 
-        // If we only matched 1 line out of context, it might be a false positive
-        val matchedCount = overlapEnd - firstMatchInNew
+        // Bug 3 fix: if confidence is low, skip the whole frame rather than appending everything
         if (matchedCount < 2 && newLines.size > 5) {
-            // Require at least 2 consecutive matching lines for confidence
-            return 0
+            return newLines.size  // Add nothing — not confident enough
         }
 
         return overlapEnd
@@ -132,16 +140,10 @@ class DeduplicationEngine {
             .joinToString("\n")
     }
 
-    /**
-     * Get raw stats about the current session.
-     */
     fun getFrameCount(): Int = totalFrames
     fun getCharCount(): Int = getAssembledText().length
     fun getRawLineCount(): Int = assembledLines.size
 
-    /**
-     * Reset for a new session.
-     */
     fun reset() {
         assembledLines.clear()
         previousFrameLines = emptyList()

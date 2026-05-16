@@ -89,14 +89,18 @@ class CaptureService : Service() {
         val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = pm.getMediaProjection(resultCode, resultData)
         mediaProjection?.registerCallback(projectionCallback, null)
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+
+        // Bug 5 fix: increase buffer from 2 → 3 to reduce dropped frames between polls
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScrollCapture", screenWidth, screenHeight, screenDensity,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null
         )
         ScrollCaptureApp.instance.container.captureSessionManager.startSession()
+
+        // Bug 5 fix: poll at ~2.5 fps instead of 1 fps so fast scrolling isn't missed
         captureJob = scope.launch {
-            while (isActive) { delay(1000L); captureFrame() }
+            while (isActive) { delay(400L); captureFrame() }
         }
     }
 
@@ -110,35 +114,39 @@ class CaptureService : Service() {
         } finally { image.close() }
     }
 
+    /**
+     * Bug 2 fix: correctly handle ImageReader row-stride padding.
+     *
+     * Android image planes use rowStride which is often wider than width × pixelStride.
+     * Copying the raw buffer directly into a width-sized bitmap silently corrupts the image
+     * because the padding bytes shift every row. Instead we:
+     *   1. Create the bitmap at the padded width (rowStride / pixelStride).
+     *   2. Copy the buffer directly — no manual ByteArray needed.
+     *   3. Crop to the real screen width to strip the right-side padding.
+     */
     private fun imageToBitmap(image: Image): Bitmap? {
         val plane = image.planes.firstOrNull() ?: return null
         val buffer = plane.buffer
-        buffer.rewind() // Ensure position is 0
-        
         val pixelStride = plane.pixelStride
         val rowStride = plane.rowStride
-        val bw = rowStride / pixelStride
-        
-        if (bw <= 0 || image.height <= 0) return null
-        
-        val bitmap = Bitmap.createBitmap(bw, image.height, Bitmap.Config.ARGB_8888)
-        
-        val remaining = buffer.remaining()
-        val required = bitmap.byteCount
-        
-        if (remaining < required) {
-            val bytes = ByteArray(required)
-            buffer.get(bytes, 0, remaining)
-            bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes))
-        } else {
-            bitmap.copyPixelsFromBuffer(buffer)
-        }
-        
-        return if (bw != image.width) {
-            val c = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+
+        // Padded width that aligns with the buffer layout
+        val paddedWidth = rowStride / pixelStride
+
+        if (paddedWidth <= 0 || image.height <= 0) return null
+
+        val bitmap = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+        buffer.rewind()
+        bitmap.copyPixelsFromBuffer(buffer)
+
+        // Crop to actual screen width if padding was added
+        return if (paddedWidth != image.width) {
+            val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
             bitmap.recycle()
-            c
-        } else bitmap
+            cropped
+        } else {
+            bitmap
+        }
     }
 
     private fun stopCapture() {
